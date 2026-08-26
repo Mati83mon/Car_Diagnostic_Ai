@@ -213,6 +213,72 @@ Note that logging goes to **stderr**: stdout carries JSON-RPC, and a stray
 `print()` there corrupts the stream and disconnects the client. There is an
 integration test that catches exactly that.
 
+## The web layer
+
+`majster_ai/web/` puts a browser in front of the same services the CLI uses.
+
+```
+majster_ai/web/
+├── protocol.py    the /ws/diagnostics message contract (mirrored in TS)
+├── approvals.py   WebSocketApprover -- the browser as an Approver
+├── session.py     one connection: telemetry loop + agent turns
+└── app.py         FastAPI: REST, WebSocket, static frontend
+```
+
+### The browser is just another Approver
+
+The whole integration is one class. `WebSocketApprover` implements the same
+`Approver` interface as `ConsoleApprover`, so the agent, the graph and the
+service are untouched — the browser simply becomes another way of answering
+the question the console asks.
+
+What it deliberately cannot do is *ask* one. The service's confirmation token
+is created and redeemed inside the server process and never appears in any
+frame; the client receives an opaque `approval_id` and can send back one
+boolean. So the worst a malicious or buggy client can do is answer a question
+the operator was already being asked.
+
+Everything ambiguous is a refusal: an id that is not the outstanding one, no
+answer inside the window, a socket that drops mid-decision, a second answer to
+an already-answered request.
+
+### Two concerns, one bus
+
+A telemetry poller and the agent both reach the same CAN interface. A UDS
+exchange is a request followed by a response on a shared transport, so two
+callers interleaving their requests each read the other's answer — and because
+both are well-formed UDS frames, the result is a plausible *wrong* number
+rather than an error.
+
+`CarInterfaceService` therefore holds a reentrant lock that serialises every
+bus operation, and the telemetry loop yields entirely while an agent turn is
+running: a diagnostic answer matters more than a gauge refreshing on time.
+
+The lock is covered by tests that detect overlapping exchanges directly, and
+those tests fail if the lock is removed.
+
+### WebSocket protocol
+
+Server frames: `hello`, `modules`, `telemetry`, `agent.status`, `agent.tool`,
+`agent.message`, `approval.request`, `approval.resolved`, `error`, `pong`.
+
+Client frames: `chat`, `approval.response`, `refresh`, `ping`.
+
+Every frame is a flat `{"type": ...}` discriminated union — the shape a
+TypeScript `switch` narrows most cleanly. `protocol.py` and
+`frontend/src/types/protocol.ts` are the two halves; keep them in step.
+
+A malformed frame is answered with an `error` and the connection stays open.
+Dropping the socket would take the telemetry stream and any pending approval
+down with it.
+
+### Frontend
+
+React + Vite + TypeScript, with `@react-three/fiber` for the chassis,
+`framer-motion` for the gauges and the authorisation gesture, and Tailwind +
+daisyUI for the surface. See `frontend/README.md` for the component map and the
+design decisions behind it.
+
 ## Testing strategy
 
 The simulator is a real UDS implementation, not a mock. Mocking `send_request`

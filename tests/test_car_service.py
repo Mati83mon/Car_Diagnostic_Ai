@@ -6,6 +6,8 @@ to point at a vehicle. They are written to be blunt about that.
 
 from __future__ import annotations
 
+import time
+
 import pytest
 
 from majster_ai.config import load_settings
@@ -303,3 +305,133 @@ class TestResilience:
     def test_context_manager(self, settings, vehicle) -> None:
         with CarInterfaceService(settings, factory=TransportFactory(settings, vehicle)) as service:
             assert service.read_dtc("ECM")["ok"] is True
+
+
+class TestConcurrency:
+    """The web UI polls telemetry while the agent reads the bus.
+
+    A UDS exchange is a request followed by a response on one transport. If two
+    callers interleave, each reads the other's answer -- and because both are
+    well-formed UDS frames, the result is a plausible wrong number rather than
+    an error. These tests prove the service serialises access.
+    """
+
+    @staticmethod
+    def _interleave_detecting_factory(settings, vehicle):
+        """A transport factory that records overlapping exchanges."""
+        import threading
+
+        from majster_ai.mcp_servers.car_interface.backends import TransportFactory
+
+        state = {"in_exchange": False, "violations": 0, "exchanges": 0}
+        guard = threading.Lock()
+
+        class Watched:
+            def __init__(self, inner):
+                self._inner = inner
+                self.request_id = inner.request_id
+                self.response_id = inner.response_id
+
+            def open(self):
+                self._inner.open()
+
+            def close(self):
+                self._inner.close()
+
+            @property
+            def is_open(self):
+                return self._inner.is_open
+
+            def flush(self):
+                self._inner.flush()
+
+            def describe(self):
+                return self._inner.describe()
+
+            def send(self, payload):
+                with guard:
+                    if state["in_exchange"]:
+                        state["violations"] += 1
+                    state["in_exchange"] = True
+                    state["exchanges"] += 1
+                # Widen the window so an unsynchronised caller reliably collides.
+                time.sleep(0.001)
+                return self._inner.send(payload)
+
+            def recv(self, timeout):
+                result = self._inner.recv(timeout)
+                with guard:
+                    state["in_exchange"] = False
+                return result
+
+        class WatchedFactory(TransportFactory):
+            def create(self, module):
+                return Watched(super().create(module))
+
+        return WatchedFactory(settings, vehicle), state
+
+    def test_concurrent_reads_do_not_interleave(self, settings, vehicle) -> None:
+        import threading
+
+        factory, state = self._interleave_detecting_factory(settings, vehicle)
+        service = CarInterfaceService(settings, factory=factory)
+        errors: list[Exception] = []
+
+        def worker(index: int) -> None:
+            try:
+                for _ in range(6):
+                    if index % 2:
+                        service.read_dtc("ECM")
+                    else:
+                        service.read_live_data(["RPM", "COOLANT_TEMP", "MAF"])
+            except Exception as exc:  # pragma: no cover - surfaced by the assert
+                errors.append(exc)
+
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(6)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=30)
+
+        service.close()
+        assert not errors, f"worker raised: {errors[0]!r}"
+        assert state["exchanges"] > 20, "the test did not actually exercise the bus"
+        assert state["violations"] == 0, (
+            f"{state['violations']} interleaved UDS exchanges - the bus lock is "
+            f"not serialising access"
+        )
+
+    def test_agent_read_and_telemetry_poll_do_not_interleave(self, settings, vehicle) -> None:
+        """The exact shape the web UI produces: a slow whole-vehicle scan while
+        a fast telemetry loop polls."""
+        import threading
+
+        factory, state = self._interleave_detecting_factory(settings, vehicle)
+        service = CarInterfaceService(settings, factory=factory)
+        stop = threading.Event()
+
+        def poller() -> None:
+            while not stop.is_set():
+                service.read_live_data(["RPM", "MAP"])
+
+        thread = threading.Thread(target=poller, daemon=True)
+        thread.start()
+        try:
+            for _ in range(3):
+                service.read_all_dtcs(["ECM", "TCM", "ABS"])
+        finally:
+            stop.set()
+            thread.join(timeout=10)
+        service.close()
+
+        assert state["violations"] == 0, (
+            f"{state['violations']} interleaved exchanges between the telemetry "
+            f"poll and the agent's scan"
+        )
+
+    def test_lock_is_exposed_for_atomic_groups(self, car) -> None:
+        # A caller needing one consistent snapshot across several reads holds it.
+        with car.bus_lock:
+            first = car.read_dtc("ECM")
+            second = car.read_live_data(["RPM"])
+        assert first["ok"] and second["ok"]

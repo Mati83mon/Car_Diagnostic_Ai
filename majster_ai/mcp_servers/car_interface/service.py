@@ -26,8 +26,10 @@ is driven by something other than our LangGraph agent.
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import secrets
+import threading
 import time
 from dataclasses import dataclass
 from typing import Any, Iterable, Sequence
@@ -63,6 +65,24 @@ log = get_logger("mcp_servers.car_interface.service")
 #: summary and decide; short enough that a stale approval cannot be replayed
 #: after the vehicle's state has moved on.
 CONFIRMATION_TTL_SECONDS = 300.0
+
+
+def _serialised(method: Any) -> Any:
+    """Serialise a method against every other vehicle operation.
+
+    A UDS exchange is a request followed by a response on a shared transport.
+    Two callers interleaving their requests -- a telemetry poller and the agent,
+    typically -- each read the other's answer, which surfaces as wildly wrong
+    values rather than as an error. The lock is reentrant because the write path
+    legitimately calls read_dtc() while already holding it.
+    """
+
+    @functools.wraps(method)
+    def wrapper(self: CarInterfaceService, *args: Any, **kwargs: Any) -> Any:
+        with self._bus_lock:
+            return method(self, *args, **kwargs)
+
+    return wrapper
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,6 +132,22 @@ class CarInterfaceService:
         self._sessions: dict[str, UdsSession] = {}
         self._pending: dict[str, PendingWrite] = {}
         self._clock = clock
+        # One bus, one conversation at a time. A UDS exchange is a
+        # request/response pair on a shared transport: if a telemetry poller
+        # and the agent interleave their requests, each reads the other's
+        # answer. Reentrant because the write path calls read_dtc() twice
+        # (before and after) while already holding the lock.
+        self._bus_lock = threading.RLock()
+
+    @property
+    def bus_lock(self) -> threading.RLock:
+        """The lock serialising vehicle access.
+
+        Exposed so a caller that needs several operations to be atomic --
+        reading DTCs and live data for one consistent snapshot, say -- can
+        hold it across the group.
+        """
+        return self._bus_lock
 
     # -- session plumbing ---------------------------------------------------
     def _session_for(self, module: EcuModule) -> UdsSession:
@@ -171,6 +207,7 @@ class CarInterfaceService:
         self.close()
 
     # -- read: DTCs ---------------------------------------------------------
+    @_serialised
     def read_dtc(self, module_id: str = "ECM", status_mask: str | int = "all") -> dict[str, Any]:
         """Read Diagnostic Trouble Codes from one module.
 
@@ -247,6 +284,7 @@ class CarInterfaceService:
             )
         return ". ".join(parts) + "."
 
+    @_serialised
     def read_all_dtcs(self, modules: Iterable[str] | None = None) -> dict[str, Any]:
         """Read DTCs from every known module -- a whole-vehicle health scan."""
         names = list(modules) if modules is not None else self.modules.names()
@@ -273,6 +311,7 @@ class CarInterfaceService:
         }
 
     # -- read: live data ----------------------------------------------------
+    @_serialised
     def read_live_data(
         self, pid_list: Sequence[str] | str, module_id: str = "ECM"
     ) -> dict[str, Any]:
@@ -384,6 +423,7 @@ class CarInterfaceService:
             text += f" Implausible readings on: {', '.join(flagged)}."
         return text
 
+    @_serialised
     def read_did(self, module_id: str, did: str | int) -> dict[str, Any]:
         """Read a raw Data Identifier -- the read-only escape hatch.
 
@@ -425,6 +465,7 @@ class CarInterfaceService:
         }
 
     # -- discovery ----------------------------------------------------------
+    @_serialised
     def scan_modules(self, timeout: float = 0.5) -> dict[str, Any]:
         """Probe every mapped address and report which ones answer.
 
@@ -476,6 +517,7 @@ class CarInterfaceService:
             ),
         }
 
+    @_serialised
     def vehicle_info(self, module_id: str = "ECM") -> dict[str, Any]:
         """Read the identification block: VIN, hardware and software numbers."""
         return self.read_live_data(
@@ -599,6 +641,7 @@ class CarInterfaceService:
                 safety_mode=self.settings.safety_mode.value,
             )
 
+    @_serialised
     def clear_dtc(
         self,
         module_id: str = "ECM",

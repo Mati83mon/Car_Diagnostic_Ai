@@ -277,6 +277,30 @@ def cmd_chat(args: argparse.Namespace, settings: Settings) -> int:
     return run_console(settings=settings)
 
 
+def cmd_web(args: argparse.Namespace, settings: Settings) -> int:
+    """Serve the Cyber-HUD web interface."""
+    from majster_ai.web.app import FRONTEND_DIST, run
+
+    if not FRONTEND_DIST.is_dir():
+        print(
+            "note: the frontend has not been built yet. The API will run, but "
+            "there is no UI to serve.\n"
+            "      Build it with:  cd frontend && npm install && npm run build\n"
+            "      Or run the Vite dev server alongside:  npm run dev\n",
+            file=sys.stderr,
+        )
+
+    scheme = f"http://{args.host}:{args.port}"
+    print(f"{PROJECT_NAME} Cyber-HUD -> {scheme}")
+    print(f"  interface : {settings.can_backend.value} ({settings.can_channel})")
+    print(f"  safety    : {settings.safety_mode.value.upper()}")
+    if not settings.can_backend.is_physical:
+        print("  NOTE      : simulated vehicle - readings are synthetic.")
+    print()
+    run(host=args.host, port=args.port, settings=settings, reload=args.reload)
+    return 0
+
+
 def cmd_serve(args: argparse.Namespace, settings: Settings) -> int:
     """Run one MCP server on stdio."""
     import importlib
@@ -360,6 +384,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     chat = sub.add_parser("chat", help="Interactive diagnostic session")
     chat.set_defaults(func=cmd_chat)
+
+    web = sub.add_parser("web", help="Serve the Cyber-HUD web interface")
+    web.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="Bind address. Anything beyond localhost exposes the diagnostic "
+        "API to your network - see docs/SAFETY.md.",
+    )
+    web.add_argument("--port", type=int, default=8000)
+    web.add_argument("--reload", action="store_true", help="Auto-reload on code changes")
+    web.set_defaults(func=cmd_web)
 
     serve = sub.add_parser("serve", help="Run one MCP server on stdio")
     serve.add_argument("server", choices=sorted(SERVERS))

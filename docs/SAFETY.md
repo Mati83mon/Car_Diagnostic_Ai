@@ -184,6 +184,30 @@ the wrong units, or an entirely different quantity.
 
 ---
 
+## The web interface
+
+`majster-ai web` puts the agent behind a browser. Three things about that.
+
+**It binds to `127.0.0.1` by default.** Anything that can reach the port can
+ask the agent to *propose* a write. The approval gate still holds — but the
+prompt would be answered by whoever is at the other end. Only use
+`--host 0.0.0.0` on a network you control, and never on an open workshop
+Wi-Fi.
+
+**The browser cannot mint an approval.** The slider sends one boolean against
+an opaque `approval_id`. The service's confirmation token is created and
+redeemed inside the server process and never appears in any WebSocket frame.
+A client can answer the question the server chose to ask; it cannot pose one.
+An id that is not the outstanding one, a second answer to an already-answered
+request, or a socket that drops mid-decision are all refusals.
+
+**The UI tells you when the vehicle is simulated.** A mechanic acting on
+synthetic readings believing they came from the car is the worst outcome this
+interface can produce, so the connection panel says so explicitly whenever the
+backend is not physical.
+
+---
+
 ## Disclaimer
 
 This project is for **educational and research purposes**. It is not a
