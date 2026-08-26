@@ -4,6 +4,7 @@
 ![Protocol](https://img.shields.io/badge/Protocol-UDS%20%7C%20CAN-orange)
 ![AI](https://img.shields.io/badge/AI-LangGraph%20%7C%20Claude-purple)
 ![MCP](https://img.shields.io/badge/Architecture-MCP-brightgreen)
+![UI](https://img.shields.io/badge/UI-React%20%7C%20Three.js-06b6d4)
 ![Safety](https://img.shields.io/badge/Default-READ__ONLY-red)
 ![License](https://img.shields.io/badge/License-MIT-green)
 
@@ -15,6 +16,12 @@ Protocol** servers and orchestrated by a **LangGraph** agent with a hard
 human-in-the-loop gate on anything that writes to the vehicle.
 
 Developed and tested against a **Land Rover Freelander 2 (2010, 2.2 TD4)**.
+
+It ships with a **Cyber-HUD web interface**: an interactive 3D chassis whose
+module pins sit at real vehicle coordinates, live telemetry gauges, and a
+drag-to-authorize gate for anything that writes to the car.
+
+![Majster-AI Cyber-HUD](docs/images/cyber-hud.png)
 
 > ### ⚠️ It defaults to a simulator, and to READ_ONLY
 >
@@ -61,7 +68,15 @@ Note what it did not do: guess, and offer to clear the codes.
 ## Architecture
 
 ```
-                     +---------------------------+
+        +--------------------------------------------------+
+        |   Cyber-HUD  (React · Three.js · Framer Motion)   |
+        +---------------------------+----------------------+
+                                    | WS /ws/diagnostics
+        +---------------------------+----------------------+
+        |         FastAPI  (telemetry · agent · HITL)       |
+        +---------------------------+----------------------+
+                                    |
+                     +--------------+------------+
                      |     LangGraph agent       |
                      |  Claude Opus 5 / Ollama   |
                      +-------------+-------------+
@@ -182,6 +197,30 @@ majster-ai search "swirl flap removal procedure"
 
 Manuals are indexed and searched locally. Nothing is uploaded.
 
+### Web interface
+
+```bash
+cd frontend && npm install && npm run build   # once
+majster-ai web                                # http://127.0.0.1:8000
+```
+
+For frontend development, run the Vite dev server alongside it:
+
+```bash
+majster-ai web            # terminal 1 — API on :8000
+cd frontend && npm run dev  # terminal 2 — UI on :5173, proxying to :8000
+```
+
+The UI streams live telemetry, shows module health on a 3D chassis, and pauses
+for a drag-to-authorize gesture before any write. Clicking a fault code flies
+the camera to the component it refers to — a chassis code like `C0034` goes to
+the front-right wheel sensor, not to the ABS module in the engine bay.
+
+`majster-ai web` binds to `127.0.0.1` by default. Anything that can reach the
+port can ask the agent to *propose* a write; the approval gate still holds, but
+the prompt would be answered by whoever is there. Only use `--host 0.0.0.0` on
+a network you control.
+
 ### As MCP servers for another client
 
 ```bash
@@ -204,6 +243,14 @@ to get through all of them.
 | **2. Token handshake** | The first call always fails and returns an impact summary plus a single-use token, bound to a hash of the exact arguments and expiring in five minutes. Approval for the ECM cannot clear the ABS module. |
 | **3. Human pause** | The graph suspends via `interrupt()`. A refusal, an empty answer, a closed stdin, a crashed UI, a non-interactive session — all mean *no*. |
 | **4. System prompt** | Tells the model what the other three layers will do. Treated as the weakest layer, because it is. |
+
+The browser is simply another approver. The slider sends one boolean; the
+confirmation token is created and redeemed inside the server process and never
+appears in any WebSocket frame. A client can *answer* the question the server
+chose to ask — it can never pose one, and it can never mint the credential that
+performs the write.
+
+![Approval gate](docs/images/hitl-approval.png)
 
 Layer 2 lives in the service behind the MCP server, so it protects the car
 even when something other than this agent is driving.
@@ -288,7 +335,7 @@ The entire suite runs against the in-process ECU simulator — no hardware, no
 API key, no network:
 
 ```
-694 passed, 1 skipped
+736 passed, 1 skipped
 ```
 
 The simulator is a real UDS implementation rather than a mock, so the retry
@@ -317,9 +364,11 @@ majster_ai/
 │   ├── car_interface/  UDS/CAN — the safety gate lives in service.py
 │   ├── rag_workshop/   local manual retrieval
 │   └── web_search/     Tavily / DuckDuckGo
+├── web/                FastAPI + /ws/diagnostics, WebSocketApprover
 ├── config.py           settings and the two safety gates
 └── cli.py
-tests/                  694 tests, all hardware-free
+frontend/               React + Three.js Cyber-HUD (see frontend/README.md)
+tests/                  736 tests, all hardware-free
 docs/                   ARCHITECTURE, SAFETY, HARDWARE, FREELANDER2
 ```
 

@@ -1,0 +1,138 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    color-scheme: dark;
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    @apply bg-void text-slate-200 font-sans antialiased;
+    /* Two very soft radial washes give the flat background depth without
+       costing a texture download. */
+    /* Kept very faint: seen through `backdrop-blur-xl` panels, anything
+       stronger composites into a milky diagonal smear across the layout. */
+    background-image:
+      radial-gradient(900px 520px at 10% -12%, rgba(56, 189, 248, 0.045), transparent 62%),
+      radial-gradient(760px 430px at 100% -6%, rgba(16, 185, 129, 0.03), transparent 58%);
+    background-attachment: fixed;
+    overflow: hidden;
+  }
+
+  ::selection {
+    @apply bg-neon/30 text-white;
+  }
+
+  /* Slim, unobtrusive scrollbars — a full-width one breaks the panel edges. */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(56, 189, 248, 0.28) transparent;
+  }
+
+  *::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+
+  *::-webkit-scrollbar-thumb {
+    background-color: rgba(56, 189, 248, 0.28);
+    border-radius: 999px;
+  }
+
+  *::-webkit-scrollbar-track {
+    background: transparent;
+  }
+}
+
+@layer components {
+  /* The glass panel: layered translucency, a hairline edge and a faint inner
+     highlight so panels read as sheets of glass rather than flat rectangles. */
+  /* The glass panel.
+     Opacity is high on purpose. A heavily translucent panel depends on
+     `backdrop-filter` to be legible at all, and that is the one property
+     browsers composite least predictably -- under software rendering the
+     layered stack washes out into a pale smear. Keeping the fill mostly
+     opaque means the panel reads correctly everywhere, and the blur becomes
+     an enhancement rather than a load-bearing dependency. */
+  .glass {
+    @apply relative rounded-2xl border border-white/[0.07] backdrop-blur-xl;
+    background:
+      linear-gradient(160deg, rgba(30, 41, 59, 0.92) 0%, rgba(17, 26, 43, 0.94) 100%);
+    box-shadow:
+      0 18px 48px -24px rgba(0, 0, 0, 0.9),
+      inset 0 1px 0 0 rgba(255, 255, 255, 0.05);
+  }
+
+  .glass-inset {
+    @apply rounded-xl border border-white/[0.05];
+    background: rgba(11, 18, 32, 0.72);
+  }
+
+  /* Section heading: small, tracked-out, quiet. */
+  .panel-title {
+    @apply text-[11px] font-semibold uppercase tracking-[0.22em] text-slate-400;
+  }
+
+  .hairline {
+    @apply border-t border-white/[0.07];
+  }
+
+  /* A subtle grid mesh, drawn in CSS so it costs nothing to load. */
+  /* Fades the bottom edge of a scroll container so a list that continues
+     below the fold reads as "more below" rather than "cut off". */
+  .fade-bottom {
+    -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 28px), transparent 100%);
+    mask-image: linear-gradient(to bottom, #000 calc(100% - 28px), transparent 100%);
+  }
+
+  .grid-mesh {
+    background-image:
+      linear-gradient(to right, rgba(148, 163, 184, 0.07) 1px, transparent 1px),
+      linear-gradient(to bottom, rgba(148, 163, 184, 0.07) 1px, transparent 1px);
+    background-size: 44px 44px;
+  }
+
+  .neon-text {
+    text-shadow: 0 0 18px rgba(56, 189, 248, 0.55);
+  }
+
+  .alert-text {
+    text-shadow: 0 0 18px rgba(244, 63, 94, 0.55);
+  }
+
+  /* Data values: tabular figures so a changing number does not jitter the
+     layout — essential when a gauge updates twice a second. */
+  .tnum {
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: 'tnum' 1;
+  }
+}
+
+@layer utilities {
+  .scrollbar-none {
+    scrollbar-width: none;
+  }
+
+  .scrollbar-none::-webkit-scrollbar {
+    display: none;
+  }
+}
+
+/* Respect the system setting: continuous pulses and sweeps are exactly what
+   motion sensitivity struggles with. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}
