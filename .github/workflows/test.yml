@@ -1,0 +1,158 @@
+name: tests
+
+# The whole suite runs against the built-in vehicle simulator, so CI never
+# needs a CAN interface, an API key, or a network connection to a car.
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHONUNBUFFERED: "1"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  # Belt and braces: even if a test forgot to isolate itself, CI can never
+  # enable vehicle writes or reach for real hardware.
+  MAJSTER_CAN_BACKEND: virtual
+  MAJSTER_WRITE_ENABLED: "false"
+  MAJSTER_LOG_LEVEL: WARNING
+
+jobs:
+  lint:
+    name: format and lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install linters
+        run: |
+          python -m pip install --upgrade pip
+          pip install "black>=24.3" "flake8>=7.0"
+
+      - name: black --check
+        run: black --check --diff majster_ai tests main.py
+
+      - name: flake8
+        run: flake8 majster_ai tests main.py
+
+  test:
+    name: pytest (python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install the project and its test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # rag-local-embeddings is deliberately excluded: it pulls in torch,
+          # and the RAG server is designed to work without it. Leaving it out
+          # means CI exercises the hash-embedding fallback path that Termux
+          # users actually run on.
+          pip install -e ".[car,mcp,agent,rag,web,dev]"
+
+      - name: Run the test suite
+        # Hardware tests need a physical vehicle interface and are never run here.
+        run: pytest -m "not hardware" --cov=majster_ai --cov-report=term-missing --cov-report=xml
+
+      - name: Upload coverage
+        if: matrix.python-version == '3.11'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage.xml
+          if-no-files-found: warn
+
+  safety:
+    name: safety invariants
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install the project
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[car,mcp,agent,rag,web,dev]"
+
+      # These are the tests that keep the project safe to point at a vehicle.
+      # They run as their own job so a failure is unmissable in the checks list
+      # rather than buried in a matrix cell.
+      - name: Write-gate and human-in-the-loop tests
+        run: |
+          pytest -v \
+            tests/test_car_service.py::TestSafetyGate \
+            tests/test_agent_graph.py::TestWriteGate \
+            tests/test_agent_graph.py::TestDecisionParsing \
+            tests/test_hitl.py \
+            tests/test_config.py::TestSafetyDefaults
+
+      - name: Assert the shipped defaults are safe
+        # A regression that flipped a default would pass every unit test that
+        # constructs settings explicitly, so assert the bare defaults directly.
+        run: |
+          python - <<'PY'
+          import os
+
+          # The workflow-level env sets MAJSTER_* for safety. Those same vars
+          # would mask the very regression this step exists to catch, so clear
+          # them and read the defaults the code actually ships with.
+          for key in [k for k in os.environ if k.startswith("MAJSTER_")]:
+              del os.environ[key]
+
+          from majster_ai.config import load_settings
+
+          settings = load_settings(env_file="/nonexistent/.env")
+          assert settings.can_backend.value == "virtual", "default backend is not the simulator"
+          assert settings.write_enabled is False, "writes are enabled by default"
+          assert settings.require_approval is True, "approval is not required by default"
+          assert settings.is_read_only is True, "default posture is not READ_ONLY"
+          assert settings.safety_mode.value == "read_only", "default safety mode changed"
+          print("Shipped defaults are safe: virtual backend, READ_ONLY, approval required.")
+          PY
+
+  integration:
+    name: MCP servers over stdio
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install the project
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[car,mcp,agent,rag,web,dev]"
+
+      # Spawns the three servers as real subprocesses and speaks JSON-RPC to
+      # them, which is also how a stray print() to stdout gets caught.
+      - name: Integration tests
+        run: pytest -v -m integration
