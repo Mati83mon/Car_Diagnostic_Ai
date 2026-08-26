@@ -1,0 +1,24 @@
+[flake8]
+max-line-length = 100
+extend-select = B950
+extend-ignore =
+    # black owns whitespace-before-colon and line-length slack
+    E203,
+    E501,
+    W503,
+exclude =
+    .git,
+    __pycache__,
+    .venv,
+    venv,
+    build,
+    dist,
+    data,
+    *.egg-info
+per-file-ignores =
+    # Re-exports in package initialisers are intentional.
+    majster_ai/__init__.py:F401
+    majster_ai/agent/__init__.py:F401
+    majster_ai/mcp_servers/__init__.py:F401
+    tests/*:F401
+max-complexity = 15

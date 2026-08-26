@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.eggs/
+
+# Environments
+.venv/
+venv/
+env/
+
+# Secrets - never commit a real .env
+.env
+.env.*
+!.env.example
+
+# Test / coverage artefacts
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# Project data: manuals are copyrighted, the index is a build artefact
+data/manuals/*
+!data/manuals/.gitkeep
+data/vectorstore/
+*.log
+
+# Captured bus traces
+*.asc
+*.blf
+*.candump
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
