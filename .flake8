@@ -14,7 +14,13 @@ exclude =
     build,
     dist,
     data,
-    *.egg-info
+    *.egg-info,
+    # Vendored JavaScript dependencies. A few npm packages ship Python
+    # alongside their JS, and linting someone else's vendored code to this
+    # project's rules is noise -- CI passes explicit paths and never sees it,
+    # so without this a bare `flake8` disagrees with CI.
+    node_modules,
+    frontend/node_modules
 per-file-ignores =
     # Re-exports in package initialisers are intentional.
     majster_ai/__init__.py:F401

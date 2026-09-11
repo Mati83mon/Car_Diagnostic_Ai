@@ -108,7 +108,16 @@ def _bus_hint(settings: Settings) -> str:
 
 
 def make_serial_port_factory(settings: Settings, *, baudrate: int = 115_200) -> Callable[[], Any]:
-    """Build a factory that opens the ELM327 serial/RFCOMM port."""
+    """Build a factory that opens the ELM327 serial/RFCOMM port.
+
+    The channel is opened through pyserial's URL handler rather than as a bare
+    device path. A path still works exactly as before -- ``/dev/rfcomm0``,
+    ``/dev/ttyUSB0``, ``COM4`` -- but it also accepts pyserial's URL forms, and
+    ``socket://host:port`` is the one that matters here: it covers the WiFi
+    ELM327 adapters that expose the interface as a TCP socket instead of a
+    tty, and it lets the machine running this stack sit somewhere other than
+    the machine the adapter is plugged into. See docs/REMOTE_ACCESS.md.
+    """
 
     def factory() -> Any:
         try:
@@ -119,14 +128,22 @@ def make_serial_port_factory(settings: Settings, *, baudrate: int = 115_200) -> 
                 "pip install 'car-diagnostic-ai[car]'"
             ) from exc
         log.info("Opening serial port %s at %d baud", settings.can_channel, baudrate)
-        return serial.Serial(
-            settings.can_channel,
-            baudrate=baudrate,
-            # Short read timeout: the transport polls for the '>' prompt and
-            # applies its own overall deadline.
-            timeout=0.2,
-            write_timeout=2.0,
-        )
+        try:
+            return serial.serial_for_url(
+                settings.can_channel,
+                baudrate=baudrate,
+                # Short read timeout: the transport polls for the '>' prompt and
+                # applies its own overall deadline.
+                timeout=0.2,
+                write_timeout=2.0,
+            )
+        except Exception as exc:  # pyserial raises SerialException and ValueError
+            raise TransportError(
+                f"Could not open {settings.can_channel!r}. For a local adapter check "
+                f"the device exists and your user can read it (on Linux: add yourself "
+                f"to the 'dialout' group). For a networked adapter use the form "
+                f"'socket://<host>:<port>' and check the host is reachable."
+            ) from exc
 
     return factory
 

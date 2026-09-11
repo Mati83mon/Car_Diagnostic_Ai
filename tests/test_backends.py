@@ -131,7 +131,30 @@ class TestBusFactory:
         serial_module = Mock()
         with patch.dict("sys.modules", {"serial": serial_module}):
             make_serial_port_factory(settings)()
-        assert serial_module.Serial.call_args.args[0] == "/dev/rfcomm0"
+        call = serial_module.serial_for_url.call_args
+        assert call.args[0] == "/dev/rfcomm0"
+        assert call.kwargs["baudrate"] == 115_200
+
+    def test_serial_factory_accepts_a_networked_adapter(self) -> None:
+        # A WiFi ELM327 exposes a TCP socket rather than a tty, and the same
+        # form lets the backend run on a different machine from the adapter.
+        settings = load_settings(
+            can_backend=CanBackend.RFCOMM, can_channel="socket://192.168.1.50:35000"
+        )
+        serial_module = Mock()
+        with patch.dict("sys.modules", {"serial": serial_module}):
+            make_serial_port_factory(settings)()
+        assert serial_module.serial_for_url.call_args.args[0] == "socket://192.168.1.50:35000"
+
+    def test_serial_factory_explains_a_failure_to_open(self) -> None:
+        settings = load_settings(
+            can_backend=CanBackend.RFCOMM, can_channel="socket://10.0.0.9:35000"
+        )
+        serial_module = Mock()
+        serial_module.serial_for_url.side_effect = OSError("unreachable")
+        with patch.dict("sys.modules", {"serial": serial_module}):
+            with pytest.raises(TransportError, match="socket://"):
+                make_serial_port_factory(settings)()
 
 
 class TestSharedBus:
