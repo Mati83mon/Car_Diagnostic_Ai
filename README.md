@@ -216,6 +216,24 @@ for a drag-to-authorize gesture before any write. Clicking a fault code flies
 the camera to the component it refers to — a chassis code like `C0034` goes to
 the front-right wheel sensor, not to the ABS module in the engine bay.
 
+The chassis is a photogrammetry scan of a Freelander 2, simplified to ~35k
+triangles and fitted to the surveyed module coordinates, rendered as a rim-lit
+hologram. If the asset cannot be fetched the view falls back to an extruded
+stand-in rather than going blank — see
+[frontend/src/components/vehicle/chassisModel.ts](frontend/src/components/vehicle/chassisModel.ts).
+
+#### Using it from another machine
+
+```bash
+majster-ai web --host 0.0.0.0      # then browse to http://<this-machine's-IP>:8000
+```
+
+Useful when the machine that goes out to the car cannot run the stack itself.
+The browser is a thin client; the vehicle interface still has to be reachable
+from whichever machine runs `majster-ai web`, which is the part that needs
+planning. [docs/REMOTE_ACCESS.md](docs/REMOTE_ACCESS.md) covers the options,
+including networked adapters via `socket://host:port`.
+
 `majster-ai web` binds to `127.0.0.1` by default. Anything that can reach the
 port can ask the agent to *propose* a write; the approval gate still holds, but
 the prompt would be answered by whoever is there. Only use `--host 0.0.0.0` on
@@ -320,6 +338,20 @@ majster-ai scan
 
 Then record what answered in `data/modules.json`. See
 [docs/FREELANDER2.md](docs/FREELANDER2.md).
+
+### The 3D chassis
+
+`frontend/public/models/freelander2.glb` is a photogrammetry reconstruction of
+a Freelander 2, produced from photographs by an image-to-3D model and then
+simplified and quantised for the web. It is decorative: nothing diagnostic is
+derived from it, and the module coordinates it is fitted to live in
+`geometry.ts` independently of it.
+
+It is a derived work of whatever photographs were fed to the generator. If you
+replace it, use images you have the rights to — press and marketing photography
+of a production car generally belongs to the manufacturer. The fit is computed
+at load time from the asset's own bounding box, so a replacement of roughly the
+right proportions will align without code changes.
 
 ---
 

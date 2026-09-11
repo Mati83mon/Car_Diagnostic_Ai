@@ -1,12 +1,20 @@
-import { Suspense, useEffect, useMemo, useRef, useState } from 'react'
+import { Component, Suspense, useEffect, useMemo, useRef, useState } from 'react'
+import type { ReactNode } from 'react'
 import { Canvas, useFrame, useThree } from '@react-three/fiber'
-import { Edges, Html, OrbitControls } from '@react-three/drei'
+import { Edges, Html, OrbitControls, useGLTF } from '@react-three/drei'
 import * as THREE from 'three'
 import type { OrbitControls as OrbitControlsImpl } from 'three-stdlib'
 import { Crosshair, Maximize2 } from 'lucide-react'
 import { cn } from '@/lib/cn'
 import { HEALTH_COLOR } from '@/lib/format'
 import type { ModuleHealth, ModuleState } from '@/types/protocol'
+import {
+  createHologramMaterial,
+  EDGE_THRESHOLD_DEGREES,
+  extractGeometry,
+  fitScannedChassis,
+  SCAN_MODEL_URL,
+} from './chassisModel'
 import {
   buildBodyGeometry,
   MODULE_ANCHORS,
@@ -100,27 +108,119 @@ function CameraDirector({ focus }: { focus: FocusPoint | null }) {
   )
 }
 
-/** The body: translucent matte shell plus a cyan wireframe over its edges. */
-function Chassis() {
+/**
+ * The extruded stand-in.
+ *
+ * Kept as the fallback rather than deleted: it needs no network fetch and no
+ * decoding, so it is what the view falls back to while the scan is in flight,
+ * and what it keeps if the scan never arrives.
+ */
+function ProceduralChassis() {
   const geometry = useMemo(() => buildBodyGeometry(), [])
   useEffect(() => () => geometry.dispose(), [geometry])
 
   return (
-    <mesh geometry={geometry} castShadow={false}>
-      {/* Near-black shell so the cyan edges carry the form. A lighter fill
-          turns the model into a grey mass and the wireframe stops reading. */}
-      <meshStandardMaterial
-        color="#04121f"
-        transparent
-        opacity={0.42}
-        roughness={0.85}
-        metalness={0.05}
-        emissive="#0a2a3f"
-        emissiveIntensity={0.35}
-        flatShading
-      />
-      <Edges threshold={18} color={NEON} />
-    </mesh>
+    <group>
+      <mesh geometry={geometry} castShadow={false}>
+        {/* Near-black shell so the cyan edges carry the form. A lighter fill
+            turns the model into a grey mass and the wireframe stops reading. */}
+        <meshStandardMaterial
+          color="#04121f"
+          transparent
+          opacity={0.42}
+          roughness={0.85}
+          metalness={0.05}
+          emissive="#0a2a3f"
+          emissiveIntensity={0.35}
+          flatShading
+        />
+        <Edges threshold={18} color={NEON} />
+      </mesh>
+      {/* The wheels belong to this body. The scan has its own, modelled in. */}
+      <Wheels />
+    </group>
+  )
+}
+
+/**
+ * The photogrammetry body.
+ *
+ * Suspends on the fetch, so it is always mounted under a boundary that shows
+ * {@link ProceduralChassis} in the meantime.
+ */
+function ScannedChassis() {
+  const { scene } = useGLTF(SCAN_MODEL_URL)
+
+  const parts = useMemo(() => {
+    const raw = extractGeometry(scene)
+    if (!raw) return null
+    const body = fitScannedChassis(raw)
+    raw.dispose()
+    return {
+      body,
+      edges: new THREE.EdgesGeometry(body, EDGE_THRESHOLD_DEGREES),
+      material: createHologramMaterial(NEON),
+    }
+  }, [scene])
+
+  useEffect(
+    () => () => {
+      parts?.body.dispose()
+      parts?.edges.dispose()
+      parts?.material.dispose()
+    },
+    [parts],
+  )
+
+  // An asset that parses but holds no mesh would otherwise render nothing at
+  // all; showing the stand-in is strictly better than showing an empty stage.
+  if (!parts) return <ProceduralChassis />
+
+  return (
+    <group>
+      <mesh geometry={parts.body} castShadow={false}>
+        <primitive object={parts.material} attach="material" />
+      </mesh>
+      <lineSegments geometry={parts.edges}>
+        <lineBasicMaterial color="#7df9ff" transparent opacity={0.55} toneMapped={false} />
+      </lineSegments>
+    </group>
+  )
+}
+
+/**
+ * Falls back to the extruded body if the scan cannot be shown.
+ *
+ * A missing or corrupt asset throws out of `useGLTF` during render, and an
+ * uncaught throw inside the canvas takes the whole 3D view down with it. In a
+ * workshop, on a tablet, on someone's phone hotspot, that is a realistic
+ * failure -- and losing the module map because a decorative mesh 404'd would
+ * be a bad trade.
+ */
+class ChassisBoundary extends Component<{ children: ReactNode }, { failed: boolean }> {
+  state = { failed: false }
+
+  static getDerivedStateFromError() {
+    return { failed: true }
+  }
+
+  componentDidCatch(error: unknown) {
+    console.warn('[vehicle] scanned chassis unavailable, using the procedural body', error)
+  }
+
+  render() {
+    if (this.state.failed) return <ProceduralChassis />
+    return this.props.children
+  }
+}
+
+function Chassis() {
+  return (
+    <ChassisBoundary>
+      <Suspense fallback={<ProceduralChassis />}>
+        <ScannedChassis />
+      </Suspense>
+    </ChassisBoundary>
   )
 }
 
@@ -281,7 +381,6 @@ function Scene({
       <directionalLight position={[-5, 3, -5]} intensity={0.28} color="#38bdf8" />
       <GroundPlane />
       <Chassis />
-      <Wheels />
 
       {MODULE_ANCHORS.map((anchor) => (
         <ModulePin
