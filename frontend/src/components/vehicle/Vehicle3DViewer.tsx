@@ -57,8 +57,17 @@ function CameraDirector({ focus }: { focus: FocusPoint | null }) {
   const { camera } = useThree()
   const targetGoal = useRef(HOME_TARGET.clone())
   const cameraGoal = useRef(HOME_CAMERA.clone())
+  // The approach is a transition, not a spring. Without this latch the lerp
+  // below never stops, so it keeps hauling the camera back to the scripted
+  // pose while the viewer is still dragging -- an orbit or a zoom is undone
+  // within a few frames and the model reads as refusing to be moved.
+  const flying = useRef(true)
+  // Auto-rotation is a screensaver for an untouched view; once someone has
+  // taken hold of the model, drifting on its own fights them.
+  const [engaged, setEngaged] = useState(false)
 
   useEffect(() => {
+    flying.current = true
     if (!focus) {
       targetGoal.current.copy(HOME_TARGET)
       cameraGoal.current.copy(HOME_CAMERA)
@@ -79,6 +88,7 @@ function CameraDirector({ focus }: { focus: FocusPoint | null }) {
   }, [focus])
 
   useFrame((_state, delta) => {
+    if (!flying.current) return
     // Frame-rate independent smoothing: a fixed lerp factor animates at a
     // different speed on a 144 Hz screen than on a 60 Hz one.
     const alpha = 1 - Math.pow(0.0016, delta)
@@ -86,8 +96,17 @@ function CameraDirector({ focus }: { focus: FocusPoint | null }) {
     const control = controls.current
     if (control) {
       control.target.lerp(targetGoal.current, alpha)
+      // Only while flying: drei already updates the controls once a frame, and
+      // a second update per frame applies the damping twice, which makes a
+      // released drag settle faster than dampingFactor says it should.
       control.update()
     }
+    // Settle rather than ease forever. Past this the motion is sub-pixel, and
+    // a lerp still running is a lerp still competing with the next drag.
+    const settled =
+      camera.position.distanceToSquared(cameraGoal.current) < 1e-4 &&
+      (!control || control.target.distanceToSquared(targetGoal.current) < 1e-4)
+    if (settled) flying.current = false
   })
 
   return (
@@ -102,8 +121,14 @@ function CameraDirector({ focus }: { focus: FocusPoint | null }) {
       // the model reads as broken.
       maxPolarAngle={Math.PI * 0.49}
       minPolarAngle={Math.PI * 0.08}
-      autoRotate={!focus}
+      autoRotate={!focus && !engaged}
       autoRotateSpeed={0.45}
+      // A drag or a wheel hands the camera to the viewer. Cancel the approach
+      // instead of lerping against the gesture, and stop the idle drift.
+      onStart={() => {
+        flying.current = false
+        setEngaged(true)
+      }}
     />
   )
 }
