@@ -1,6 +1,11 @@
 /** @type {import('tailwindcss').Config} */
 export default {
   content: ['./index.html', './src/**/*.{ts,tsx}'],
+  // The chat renders markdown tables, so "table" appears in the source as an
+  // element name. Tailwind treats every word it scans as a possible class, and
+  // daisyUI would ship its whole table component for that one. Nothing in the
+  // app uses the class, so keep it out of the bundle.
+  blocklist: ['table'],
   theme: {
     extend: {
       colors: {

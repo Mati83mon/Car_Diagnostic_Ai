@@ -33,6 +33,9 @@ export default defineConfig({
           three: ['three', '@react-three/fiber', '@react-three/drei'],
           charts: ['recharts'],
           motion: ['framer-motion'],
+          // The markdown parser behind the chat is most of what the chat
+          // weighs. Kept apart so an app update does not re-download it.
+          markdown: ['react-markdown', 'remark-gfm'],
         },
       },
     },
