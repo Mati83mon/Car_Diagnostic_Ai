@@ -13,7 +13,12 @@ ingestion updates the index in place instead of duplicating every chunk.
 from __future__ import annotations
 
 import hashlib
+import importlib.util
+import logging
 import re
+import unicodedata
+from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final, Iterable, Iterator, Sequence
 
@@ -27,6 +32,12 @@ log = get_logger("mcp_servers.rag_workshop.ingest")
 SUPPORTED_EXTENSIONS: Final[frozenset[str]] = frozenset(
     {".pdf", ".txt", ".md", ".markdown", ".html", ".htm"}
 )
+
+#: A PDF page whose visible text is at least this share of characters that did
+#: not decode is left out of the index. Its few readable words -- often just a
+#: heading -- would let the search find the page, and the model would then
+#: fill in a procedure the page never gave it.
+UNREADABLE_PAGE_SHARE: Final = 0.5
 
 #: Split points, tried in order: paragraph, line, sentence, word, character.
 _SPLIT_SEPARATORS: Final[tuple[str, ...]] = ("\n\n", "\n", ". ", " ", "")
@@ -49,6 +60,71 @@ def strip_html(markup: str) -> str:
     """Crude but dependency-free HTML to text."""
     without_scripts = _HTML_SCRIPT_RE.sub(" ", markup)
     return normalise_text(_HTML_TAG_RE.sub(" ", without_scripts))
+
+
+def _undecodable(char: str) -> bool:
+    """True for a character a PDF text layer produces when decoding failed.
+
+    A font without a usable character map extracts as its raw codes -- control
+    characters -- or as private-use code points, and a broken stream as
+    U+FFFD. None of it is text anybody wrote.
+    """
+    if char in "\t\n\r":
+        return False
+    if char == "\ufffd":
+        return True
+    return unicodedata.category(char) in ("Cc", "Co", "Cn", "Cs")
+
+
+def undecodable_share(text: str) -> float:
+    """The share of the visible characters in ``text`` that did not decode."""
+    visible = [char for char in text if _undecodable(char) or not char.isspace()]
+    if not visible:
+        return 0.0
+    return sum(1 for char in visible if _undecodable(char)) / len(visible)
+
+
+def drop_undecodable(text: str) -> str:
+    """Remove the characters that did not decode and keep the rest."""
+    return "".join(char for char in text if not _undecodable(char))
+
+
+def fonttools_available() -> bool:
+    """Whether pypdf can read the encoding of an embedded CFF font.
+
+    Without fontTools, text set in such a font with no character map of its
+    own extracts as control characters instead of words.
+    """
+    return importlib.util.find_spec("fontTools") is not None
+
+
+@dataclass
+class PageStats:
+    """What text extraction made of one file's pages."""
+
+    pages: int = 0
+    #: Pages with no text layer at all: blank, or scanned images.
+    no_text: int = 0
+    #: Pages whose text did not decode, or that failed to extract.
+    unreadable: int = 0
+
+
+@contextmanager
+def _pypdf_warnings_muted() -> Iterator[None]:
+    """Hold pypdf's warnings back while one file is read.
+
+    For a font it cannot decode, pypdf logs a warning with the whole font
+    dictionary in it, and a large manual has thousands of them: a screenful
+    of numbers that buries everything else. The pages they spoil are counted
+    in :class:`PageStats` and reported once, with what to do about them.
+    """
+    logger = logging.getLogger("pypdf")
+    previous = logger.level
+    logger.setLevel(logging.ERROR)
+    try:
+        yield
+    finally:
+        logger.setLevel(previous)
 
 
 def _split_recursive(segment: str, separators: Sequence[str], budget: int) -> list[str]:
@@ -155,12 +231,16 @@ def chunk_id(source: str, page: int | None, index: int, text: str) -> str:
     return f"wm-{digest}"
 
 
-def load_pdf_pages(path: Path) -> Iterator[tuple[int, str]]:
+def load_pdf_pages(path: Path, stats: PageStats | None = None) -> Iterator[tuple[int, str]]:
     """Yield ``(page_number, text)`` for each page of a PDF.
 
     A page that will not extract is logged and skipped: one malformed page in
-    a 3000-page manual must not abort the whole ingest.
+    a 3000-page manual must not abort the whole ingest. So is a page whose
+    text did not decode. Passed on, it would reach the model as a passage with
+    a page number on it, which reads like a citation and is not one. Both are
+    counted in ``stats``.
     """
+    stats = stats if stats is not None else PageStats()
     try:
         from pypdf import PdfReader
     except ImportError as exc:  # pragma: no cover - environment dependent
@@ -169,27 +249,39 @@ def load_pdf_pages(path: Path) -> Iterator[tuple[int, str]]:
             "pip install 'car-diagnostic-ai[rag]'"
         ) from exc
 
-    try:
-        reader = PdfReader(str(path))
-    except Exception as exc:
-        raise RagError(f"Cannot open the PDF {path.name}: {exc}", source=str(path)) from exc
-
-    for number, page in enumerate(reader.pages, start=1):
+    with _pypdf_warnings_muted():
         try:
-            text = page.extract_text() or ""
+            reader = PdfReader(str(path))
         except Exception as exc:
-            log.warning("Skipping page %d of %s: %s", number, path.name, exc)
-            continue
-        cleaned = normalise_text(text)
-        if cleaned:
-            yield number, cleaned
+            raise RagError(f"Cannot open the PDF {path.name}: {exc}", source=str(path)) from exc
+
+        for number, page in enumerate(reader.pages, start=1):
+            stats.pages += 1
+            try:
+                text = page.extract_text() or ""
+            except Exception as exc:
+                log.warning("Skipping page %d of %s: %s", number, path.name, exc)
+                stats.unreadable += 1
+                continue
+            cleaned = normalise_text(text)
+            if not cleaned:
+                stats.no_text += 1
+                continue
+            if undecodable_share(cleaned) >= UNREADABLE_PAGE_SHARE:
+                stats.unreadable += 1
+                continue
+            # A readable page can still carry a few: a bullet from a symbol
+            # font, a stray glyph. They would only show up as boxes.
+            cleaned = normalise_text(drop_undecodable(cleaned))
+            if cleaned:
+                yield number, cleaned
 
 
-def load_file(path: Path) -> Iterator[tuple[int | None, str]]:
+def load_file(path: Path, stats: PageStats | None = None) -> Iterator[tuple[int | None, str]]:
     """Yield ``(page, text)`` for any supported file type."""
     suffix = path.suffix.lower()
     if suffix == ".pdf":
-        yield from load_pdf_pages(path)
+        yield from load_pdf_pages(path, stats)
         return
 
     try:
@@ -215,11 +307,15 @@ def discover_manuals(directory: str | Path) -> list[Path]:
 
 
 def documents_from_file(
-    path: Path, *, chunk_size: int = 1200, chunk_overlap: int = 200
+    path: Path,
+    *,
+    chunk_size: int = 1200,
+    chunk_overlap: int = 200,
+    stats: PageStats | None = None,
 ) -> Iterator[Document]:
     """Load one file and yield its chunks as :class:`Document` objects."""
     source = str(path)
-    for page, text in load_file(path):
+    for page, text in load_file(path, stats):
         for index, chunk in enumerate(split_text(text, chunk_size, chunk_overlap)):
             metadata: dict[str, Any] = {
                 "source": source,
@@ -237,24 +333,36 @@ def documents_from_directory(
     chunk_size: int = 1200,
     chunk_overlap: int = 200,
     files: Iterable[Path] | None = None,
+    stats: dict[str, PageStats] | None = None,
 ) -> Iterator[Document]:
     """Load and chunk every manual in a directory.
 
     A file that fails to load is logged and skipped, so one corrupt PDF cannot
-    prevent the rest of the library from being indexed.
+    prevent the rest of the library from being indexed. ``stats``, if given,
+    collects each PDF's page counts under its file name.
     """
     for path in (list(files) if files is not None else discover_manuals(directory)):
         log.info("Ingesting %s", path.name)
+        file_stats = PageStats()
+        if stats is not None:
+            stats[path.name] = file_stats
         try:
-            yield from documents_from_file(path, chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+            yield from documents_from_file(
+                path, chunk_size=chunk_size, chunk_overlap=chunk_overlap, stats=file_stats
+            )
         except RagError as exc:
             log.error("Skipping %s: %s", path.name, exc.message)
 
 
 __all__ = [
     "SUPPORTED_EXTENSIONS",
+    "UNREADABLE_PAGE_SHARE",
+    "PageStats",
     "normalise_text",
     "strip_html",
+    "undecodable_share",
+    "drop_undecodable",
+    "fonttools_available",
     "split_text",
     "chunk_id",
     "load_pdf_pages",

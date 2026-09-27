@@ -55,7 +55,11 @@ agent = [
 # it the store falls back to a deterministic hash embedder (see rag_workshop).
 rag = [
     "chromadb>=0.5",
-    "pypdf>=4.0",
+    # pypdf reads the encoding of an embedded CFF font through fontTools, since
+    # 6.17. Without both, text set in such a font that has no character map of
+    # its own extracts as control characters instead of words.
+    "pypdf>=6.17",
+    "fonttools>=4.0",
     "langchain-text-splitters>=0.3",
 ]
 rag-local-embeddings = [

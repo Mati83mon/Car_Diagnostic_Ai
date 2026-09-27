@@ -197,6 +197,11 @@ majster-ai search "swirl flap removal procedure"
 
 Manuals are indexed and searched locally. Nothing is uploaded.
 
+`ingest` ends by saying how many PDF pages it could not read -- scanned images
+with no text layer, or fonts whose text did not decode -- and what would fix
+them. Those pages are left out of the index rather than served to the agent as
+unreadable passages with a page number on them.
+
 ### Web interface
 
 ```bash

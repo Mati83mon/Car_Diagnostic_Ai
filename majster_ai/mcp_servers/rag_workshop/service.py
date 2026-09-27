@@ -12,6 +12,7 @@ before undoing a suspension bolt.
 from __future__ import annotations
 
 import time
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -21,8 +22,10 @@ from majster_ai.logging_setup import get_logger, log_agent_step
 from majster_ai.mcp_servers.rag_workshop.embeddings import EmbeddingBackend, build_embeddings
 from majster_ai.mcp_servers.rag_workshop.ingest import (
     SUPPORTED_EXTENSIONS,
+    PageStats,
     discover_manuals,
     documents_from_directory,
+    fonttools_available,
 )
 from majster_ai.mcp_servers.rag_workshop.store import Document, VectorStore, build_store
 
@@ -34,6 +37,38 @@ MIN_RELEVANCE_SCORE = 0.05
 
 #: Chunks are embedded in batches to bound peak memory on small devices.
 INGEST_BATCH_SIZE = 64
+
+
+def _left_out_note(skipped: int, stats: dict[str, PageStats]) -> str:
+    """Say what was left out of the index, and what would fix it.
+
+    Empty when everything was indexed. A manual whose text did not decode
+    still "ingests" without an error, so this is the only place the operator
+    learns that most of it cannot be searched.
+    """
+    pages = sum(entry.pages for entry in stats.values())
+    unreadable = sum(entry.unreadable for entry in stats.values())
+    no_text = sum(entry.no_text for entry in stats.values())
+    notes: list[str] = []
+    if skipped:
+        notes.append(f"{skipped} chunk(s) with no searchable words were left out.")
+    if unreadable:
+        remedy = (
+            "they need OCR (for example ocrmypdf) before they can be searched"
+            if fonttools_available()
+            else "pypdf needs fontTools to decode their fonts: run 'pip install fonttools', "
+            "then rebuild the index with 'majster-ai ingest --rebuild'"
+        )
+        notes.append(
+            f"{unreadable} of {pages} PDF page(s) did not decode to readable text and "
+            f"were left out; {remedy}."
+        )
+    if no_text:
+        notes.append(
+            f"{no_text} page(s) had no text at all: blank, or scanned images, which "
+            f"need OCR to be searchable."
+        )
+    return "".join(f" {note}" for note in notes)
 
 
 class RagService:
@@ -110,16 +145,18 @@ class RagService:
 
         total_chunks = 0
         added = 0
+        skipped = 0
+        page_stats: dict[str, PageStats] = {}
         batch: list[Document] = []
 
         def flush() -> int:
-            nonlocal batch
+            nonlocal batch, skipped
             if not batch:
                 return 0
-            vectors = self.embeddings.embed_documents([doc.text for doc in batch])
-            count = self.store.add_documents(batch, vectors)
+            batch_added, batch_skipped = self._store_batch(batch)
+            skipped += batch_skipped
             batch = []
-            return count
+            return batch_added
 
         try:
             for document in documents_from_directory(
@@ -127,6 +164,7 @@ class RagService:
                 chunk_size=self.settings.rag_chunk_size,
                 chunk_overlap=self.settings.rag_chunk_overlap,
                 files=files,
+                stats=page_stats,
             ):
                 batch.append(document)
                 total_chunks += 1
@@ -140,6 +178,11 @@ class RagService:
             self.store.save()
 
         elapsed = time.monotonic() - started
+        summary = (
+            f"Indexed {total_chunks - skipped} chunk(s) from {len(files)} file(s) in "
+            f"{elapsed:.1f}s. The index now holds {self.store.count()} chunk(s)."
+            f"{_left_out_note(skipped, page_stats)}"
+        )
         return {
             "ok": True,
             "manuals_dir": str(directory),
@@ -147,14 +190,28 @@ class RagService:
             "file_count": len(files),
             "chunks_processed": total_chunks,
             "chunks_added": added,
+            "chunks_skipped": skipped,
+            "pdf_pages": {name: asdict(entry) for name, entry in page_stats.items() if entry.pages},
             "total_in_index": self.store.count(),
             "embedding_backend": self.embeddings.describe(),
             "elapsed_seconds": round(elapsed, 2),
-            "summary": (
-                f"Indexed {total_chunks} chunk(s) from {len(files)} file(s) in "
-                f"{elapsed:.1f}s. The index now holds {self.store.count()} chunk(s)."
-            ),
+            "summary": summary,
         }
+
+    def _store_batch(self, batch: list[Document]) -> tuple[int, int]:
+        """Embed and store a batch of chunks. Returns (added, skipped).
+
+        A chunk with no searchable words -- "4. 5. 6.", a run of symbols --
+        embeds to the zero vector. It matches nothing, and in an L2 index it
+        sits closer to every query than most real passages do, so it would come
+        back first for anything asked. Those are left out.
+        """
+        vectors = self.embeddings.embed_documents([doc.text for doc in batch])
+        kept = [(doc, vector) for doc, vector in zip(batch, vectors) if any(vector)]
+        if not kept:
+            return 0, len(batch)
+        added = self.store.add_documents([doc for doc, _ in kept], [vector for _, vector in kept])
+        return added, len(batch) - len(kept)
 
     # -- retrieval ----------------------------------------------------------
     def search_manual(
@@ -199,6 +256,18 @@ class RagService:
 
         try:
             vector = self.embeddings.embed_query(query)
+            if not any(vector):
+                # Nothing to compare: every passage would score the same, and
+                # whichever came back first would look like an answer.
+                return {
+                    "ok": False,
+                    "error": "no_searchable_words",
+                    "message": (
+                        f"{query!r} has no searchable words: only common words or "
+                        f"single characters. Use the manual's own terms, e.g. a "
+                        f"DTC number, a component or a procedure."
+                    ),
+                }
             # Over-fetch when filtering so the filter does not starve the result.
             fetched = self.store.search(vector, limit * 4 if source_filter else limit)
         except MajsterError as exc:
