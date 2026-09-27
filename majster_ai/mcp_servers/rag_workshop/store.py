@@ -289,7 +289,7 @@ class ChromaVectorStore(VectorStore):
             response = self._collection.query(
                 query_embeddings=[list(map(float, vector))],
                 n_results=max(min(top_k, self.count()), 1),
-                include=["documents", "metadatas", "distances"],
+                include=["documents", "metadatas", "embeddings"],
             )
         except Exception as exc:
             raise RagError(f"Chroma query failed: {exc}") from exc
@@ -297,13 +297,19 @@ class ChromaVectorStore(VectorStore):
         ids = (response.get("ids") or [[]])[0]
         texts = (response.get("documents") or [[]])[0]
         metadatas = (response.get("metadatas") or [[]])[0]
-        distances = (response.get("distances") or [[]])[0]
+        # Chroma hands embeddings back as numpy arrays, which refuse the
+        # truth test the other fields get.
+        embeddings = response.get("embeddings")
+        stored = embeddings[0] if embeddings is not None and len(embeddings) else []
 
         results: list[SearchResult] = []
         for index, identifier in enumerate(ids):
-            distance = float(distances[index]) if index < len(distances) else 1.0
-            # Chroma returns squared L2 distance by default; on normalised
-            # vectors that maps to cosine similarity as 1 - d/2.
+            # Scored as the cosine against the stored vector rather than from
+            # Chroma's squared L2 distance. The two agree on unit vectors, but
+            # a zero vector -- a chunk with no words, indexed before ingestion
+            # started leaving those out -- is at distance 1 from every query,
+            # which reads as a 0.5 match to anything.
+            score = cosine_similarity(vector, stored[index]) if index < len(stored) else 0.0
             results.append(
                 SearchResult(
                     document=Document(
@@ -315,9 +321,10 @@ class ChromaVectorStore(VectorStore):
                             else {}
                         ),
                     ),
-                    score=max(0.0, min(1.0, 1.0 - distance / 2.0)),
+                    score=float(max(0.0, min(1.0, score))),
                 )
             )
+        results.sort(key=lambda result: result.score, reverse=True)
         return results
 
     def count(self) -> int:
