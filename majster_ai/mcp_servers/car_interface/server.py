@@ -171,8 +171,10 @@ def build_server(service: CarInterfaceService | None = None) -> Any:
     def list_signals() -> dict[str, Any]:
         """List every live-data signal available to read_live_data.
 
-        Includes the identifier, unit, scaling formula and plausible range for
-        each, and whether the scaling is verified for this vehicle.
+        Includes the identifier, unit, scaling formula and sensor limits for
+        each, and whether the scaling is verified for this vehicle. The sensor
+        limits are what the sensor can physically report -- a reading outside
+        them means a wiring or sensor fault -- not the healthy operating range.
         """
         return car.list_signals()
 
