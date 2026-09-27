@@ -223,7 +223,7 @@ class SignalDefinition:
             "formula": self.formula,
             "aliases": list(self.aliases),
             "verified": self.verified,
-            "plausible_range": (
+            "sensor_limits": (
                 None
                 if self.minimum is None and self.maximum is None
                 else {"min": self.minimum, "max": self.maximum}
