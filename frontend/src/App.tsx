@@ -155,6 +155,13 @@ export default function App() {
           // not enough height, and clipping the module list mid-row looks
           // broken rather than dense -- so the page scrolls instead.
           'xl:overflow-hidden',
+          // ...which only happens if the rows are sized by their content. Every
+          // panel is min-h-0 so the desktop dashboard can clip them, and in a
+          // definite-height grid that lets auto rows squeeze into a single
+          // screen. On a phone the three rows came out ~226px each, the 3D view
+          // and terminal overflowed onto the panels below, and there was
+          // nothing to scroll to.
+          'max-lg:auto-rows-max',
         )}
       >
         <VehicleStatusPanel
@@ -185,7 +192,11 @@ export default function App() {
             agentDetail={agentDetail}
             connected={connected}
             onSend={sendChat}
-            className="min-h-[300px] flex-1 lg:min-h-[360px]"
+            // A fixed height on phones keeps the transcript scrolling inside
+            // the panel instead of growing the page with every message.
+            // Turning the growth off matters: under flex-1 the basis comes from
+            // the content and the height is ignored, so the panel grew anyway.
+            className="min-h-[300px] flex-1 max-lg:h-[480px] max-lg:flex-none lg:min-h-[360px]"
           />
         </div>
 
