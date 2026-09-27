@@ -551,6 +551,25 @@ class TestRagService:
         found = service.search_manual("EGR valve battery clamp bolts torque")
         assert {entry["page"] for entry in found["results"]} == {1, 4}
 
+    def test_manuals_sharing_a_file_name_are_both_reported(
+        self, tmp_path: Path, mixed_pdf: Path
+    ) -> None:
+        library = tmp_path / "library"
+        for folder in ("2006", "2010"):
+            (library / folder).mkdir(parents=True)
+            (library / folder / "manual.pdf").write_bytes(mixed_pdf.read_bytes())
+        settings = load_settings(
+            manuals_dir=library, vector_dir=tmp_path / "vs", log_level="CRITICAL"
+        )
+        service = RagService(
+            settings,
+            embeddings=HashEmbeddings(),
+            store=InMemoryVectorStore(None, HashEmbeddings().name),
+        )
+        result = service.ingest()
+        assert sorted(result["pdf_pages"]) == ["2006/manual.pdf", "2010/manual.pdf"]
+        assert "4 of 10 PDF page(s) did not decode" in result["summary"]
+
     def test_reingest_is_idempotent(self, service: RagService) -> None:
         first = service.ingest()["total_in_index"]
         assert service.ingest()["total_in_index"] == first

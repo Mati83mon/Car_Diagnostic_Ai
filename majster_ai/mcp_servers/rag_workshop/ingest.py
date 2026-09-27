@@ -339,13 +339,16 @@ def documents_from_directory(
 
     A file that fails to load is logged and skipped, so one corrupt PDF cannot
     prevent the rest of the library from being indexed. ``stats``, if given,
-    collects each PDF's page counts under its file name.
+    collects each PDF's page counts under its path relative to ``directory``,
+    since manuals in different subfolders may share a file name.
     """
-    for path in (list(files) if files is not None else discover_manuals(directory)):
+    root = Path(directory)
+    for path in (list(files) if files is not None else discover_manuals(root)):
         log.info("Ingesting %s", path.name)
         file_stats = PageStats()
         if stats is not None:
-            stats[path.name] = file_stats
+            key = path.relative_to(root).as_posix() if path.is_relative_to(root) else str(path)
+            stats[key] = file_stats
         try:
             yield from documents_from_file(
                 path, chunk_size=chunk_size, chunk_overlap=chunk_overlap, stats=file_stats
